@@ -1,0 +1,46 @@
+﻿version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: payrecon-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: payrecon
+      POSTGRES_USER: payrecon
+      POSTGRES_PASSWORD: payrecon
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+    container_name: payrecon-backend
+    depends_on:
+      - db
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://payrecon:payrecon@db:5432/payrecon
+      APP_ENV: development
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    image: node:20-alpine
+    container_name: payrecon-frontend
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+
+volumes:
+  postgres_data:
