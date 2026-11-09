@@ -99,6 +99,14 @@ them before they are treated as an integration contract. Merchant accounting
 and refund record internals remain opaque dictionaries until their source
 schema is agreed.
 
+For provisional lineage graph construction only,
+`ProvisionalMerchantBusinessRecords` additionally accepts optional
+`fulfillment_record_id` and `updated_by_event_id` values. These are interface
+proposals, not confirmed database columns. The graph adapter recognizes
+explicit nested record IDs and references documented in
+[`lineage-engine.md`](./lineage-engine.md); it does not infer them from matching
+amounts or timestamps.
+
 ### Event and financial identity rules
 
 - A webhook event ID identifies an event, not a payment or capture.

@@ -46,6 +46,8 @@ class ProvisionalWebhookEvent(ProvisionalContract):
 class ProvisionalMerchantBusinessRecords(ProvisionalContract):
     merchant_order_id: str
     fulfillment_status: str | None = None
+    fulfillment_record_id: str | None = None
+    updated_by_event_id: str | None = None
     shipping_information: dict[str, Any] | None = None
     accounting_entries: list[dict[str, Any]]
     refund_records: list[dict[str, Any]]
