@@ -1,8 +1,8 @@
-﻿import "./globals.css";
+import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "PayRecon AI",
+  title: "PayRecon AI Finance Dashboard",
   description: "Financial intelligence for PayPal reconciliation workflows.",
 };
 
