@@ -6,11 +6,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
+from app.core.security import Principal, Role, require_roles
 from app.models import MerchantOrder
 from app.schemas.persistence import MerchantOrderResponse
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 logger = logging.getLogger(__name__)
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
 
 
 @router.get("")
@@ -18,14 +20,15 @@ def list_orders(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> list[MerchantOrderResponse]:
     try:
-        orders = db.scalars(
-            select(MerchantOrder)
-            .order_by(MerchantOrder.created_at.desc(), MerchantOrder.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
+        query = select(MerchantOrder).order_by(
+            MerchantOrder.created_at.desc(), MerchantOrder.id.desc()
+        )
+        if principal.role != Role.ADMIN:
+            query = query.where(MerchantOrder.merchant_id == principal.merchant_id)
+        orders = db.scalars(query.limit(limit).offset(offset)).all()
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal orders.")
         raise HTTPException(
@@ -39,11 +42,13 @@ def list_orders(
 def get_order(
     order_id: str = Path(min_length=1, max_length=128),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> MerchantOrderResponse:
     try:
-        order = db.scalar(
-            select(MerchantOrder).where(MerchantOrder.paypal_order_id == order_id)
-        )
+        query = select(MerchantOrder).where(MerchantOrder.paypal_order_id == order_id)
+        if principal.role != Role.ADMIN:
+            query = query.where(MerchantOrder.merchant_id == principal.merchant_id)
+        order = db.scalar(query)
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal order.")
         raise HTTPException(

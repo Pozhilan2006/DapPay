@@ -5,14 +5,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
+from app.core.security import Principal, Role, require_roles
 from app.schemas.reconciliation import ReconciliationRunResponse
 from app.services.reconciliation_workflow import run_persisted_reconciliation
 
 router = APIRouter(prefix="/reconciliation", tags=["Reconciliation"])
 logger = logging.getLogger(__name__)
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
+_WRITE_ROLES = (Role.ADMIN, Role.MERCHANT)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_roles(*_READ_ROLES))])
 def get_reconciliation_status() -> dict[str, str]:
     return {"status": "ready", "message": "Persisted reconciliation is available."}
 
@@ -20,12 +23,18 @@ def get_reconciliation_status() -> dict[str, str]:
 @router.post("/run", response_model=ReconciliationRunResponse)
 def run_reconciliation(
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_WRITE_ROLES)),
 ) -> ReconciliationRunResponse:
     try:
-        result = run_persisted_reconciliation(db)
+        result = run_persisted_reconciliation(
+            db,
+            merchant_id=(
+                None if principal.role == Role.ADMIN else principal.merchant_id
+            ),
+        )
     except SQLAlchemyError:
         db.rollback()
-        logger.exception("Persisted reconciliation failed.")
+        logger.error("Persisted reconciliation failed.")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Reconciliation storage is temporarily unavailable.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -14,57 +15,174 @@ from app.integration_contracts.payment_data import (
     ProvisionalWebhookEvent,
 )
 from app.models import MerchantOrder, PaymentCapture, WebhookEvent
-from app.reconciliation.engine import ReconciliationEngine, ReconciliationResult
+from app.schemas.reconciliation import TransactionReview
+from app.reconciliation.engine import (
+    ReconciliationEngine,
+    ReconciliationResult,
+    ReconciliationSummary,
+)
 
 
-def run_persisted_reconciliation(session: Session) -> ReconciliationResult:
+def run_persisted_reconciliation(
+    session: Session, *, merchant_id: str | None = None
+) -> ReconciliationResult:
     """Reconcile persisted facts and atomically append genuine exception cases.
 
     The repository keys records by the deterministic engine case ID, so reruns
     of the same facts are idempotent. No case is manufactured for investigation.
     """
-    orders = session.scalars(
-        select(MerchantOrder).order_by(MerchantOrder.paypal_order_id)
-    ).all()
-    captures = session.scalars(
-        select(PaymentCapture).order_by(PaymentCapture.paypal_capture_id)
-    ).all()
-    events = session.scalars(
-        select(WebhookEvent).order_by(WebhookEvent.paypal_event_id)
-    ).all()
-
-    reconciled_orders = [order for order in orders if _complete_order(order)]
-    order_dtos = tuple(_order_dto(order) for order in reconciled_orders)
-    order_keys = {
-        order.paypal_order_id: _reconciliation_order_id(order)
-        for order in reconciled_orders
-    }
-    payment_dtos = tuple(
-        _payment_dto(capture, merchant_order_id=order_keys.get(capture.paypal_order_id))
-        for capture in captures
-        if _complete_capture(capture) and capture.paypal_order_id in order_keys
+    order_query = select(MerchantOrder).order_by(MerchantOrder.paypal_order_id)
+    if merchant_id is not None:
+        order_query = order_query.where(MerchantOrder.merchant_id == merchant_id)
+    orders = session.scalars(order_query).all()
+    order_ids = tuple(order.paypal_order_id for order in orders)
+    captures = (
+        session.scalars(
+            select(PaymentCapture)
+            .where(PaymentCapture.paypal_order_id.in_(order_ids))
+            .order_by(PaymentCapture.paypal_capture_id)
+        ).all()
+        if order_ids
+        else []
     )
-    webhook_dtos = tuple(_webhook_dto(event) for event in events if _complete_event(event))
-
-    result = ReconciliationEngine().run(
-        merchant_orders=order_dtos,
-        paypal_payments=payment_dtos,
-        webhook_events=webhook_dtos,
+    resource_owner = {order.paypal_order_id: order.merchant_id for order in orders}
+    resource_owner.update(
+        {
+            capture.paypal_capture_id: resource_owner.get(capture.paypal_order_id)
+            for capture in captures
+        }
     )
-    persist_exception_cases(session, result.exception_cases)
+    event_query = select(WebhookEvent).order_by(WebhookEvent.paypal_event_id)
+    if merchant_id is not None:
+        event_query = event_query.where(
+            WebhookEvent.resource_id.in_(
+                tuple(
+                    resource_id
+                    for resource_id, owner in resource_owner.items()
+                    if owner == merchant_id
+                )
+            )
+        )
+    events = session.scalars(event_query).all()
+
+    orders_by_owner: dict[str | None, list[MerchantOrder]] = {}
+    for order in orders:
+        orders_by_owner.setdefault(order.merchant_id, []).append(order)
+    if merchant_id is not None:
+        owners = [merchant_id]
+        orders_by_owner.setdefault(merchant_id, [])
+    else:
+        owners = sorted(orders_by_owner, key=lambda value: value or "")
+        for event in events:
+            owner = resource_owner.get(event.resource_id)
+            if owner not in owners:
+                owners.append(owner)
+                orders_by_owner.setdefault(owner, [])
+        if not owners:
+            owners = [None]
+
+    results: list[ReconciliationResult] = []
+    owner_by_evidence: dict[str, str] = {}
+    for owner in owners:
+        owner_orders = orders_by_owner.get(owner, [])
+        owner_order_ids = {order.paypal_order_id for order in owner_orders}
+        owner_captures = [
+            capture
+            for capture in captures
+            if capture.paypal_order_id in owner_order_ids
+        ]
+        owner_capture_ids = {capture.paypal_capture_id for capture in owner_captures}
+        owner_events = [
+            event
+            for event in events
+            if event.resource_id in owner_order_ids | owner_capture_ids
+            or (owner is None and event.resource_id not in resource_owner)
+        ]
+        reconciled_orders = [order for order in owner_orders if _complete_order(order)]
+        order_dtos = tuple(_order_dto(order) for order in reconciled_orders)
+        order_keys = {
+            order.paypal_order_id: _reconciliation_order_id(order)
+            for order in reconciled_orders
+        }
+        payment_dtos = tuple(
+            _payment_dto(
+                capture,
+                merchant_order_id=order_keys.get(capture.paypal_order_id),
+            )
+            for capture in owner_captures
+            if _complete_capture(capture) and capture.paypal_order_id in order_keys
+        )
+        webhook_dtos = tuple(
+            _webhook_dto(event) for event in owner_events if _complete_event(event)
+        )
+        results.append(
+            ReconciliationEngine().run(
+                merchant_orders=order_dtos,
+                paypal_payments=payment_dtos,
+                webhook_events=webhook_dtos,
+            )
+        )
+        if owner is not None:
+            owner_by_evidence.update(
+                {
+                    resource_id: owner
+                    for resource_id in owner_order_ids | owner_capture_ids
+                }
+            )
+            owner_by_evidence.update(
+                {event.paypal_event_id: owner for event in owner_events}
+            )
+    cases = tuple(case for result in results for case in result.exception_cases)
+    summary = ReconciliationSummary(
+        order_count=sum(result.summary.order_count for result in results),
+        payment_count=sum(result.summary.payment_count for result in results),
+        matched_order_count=sum(
+            result.summary.matched_order_count for result in results
+        ),
+        unmatched_payment_count=sum(
+            result.summary.unmatched_payment_count for result in results
+        ),
+        exception_count=sum(result.summary.exception_count for result in results),
+        exceptions_by_type=dict(
+            sum(
+                (Counter(result.summary.exceptions_by_type) for result in results),
+                Counter(),
+            )
+        ),
+        exceptions_by_severity=dict(
+            sum(
+                (Counter(result.summary.exceptions_by_severity) for result in results),
+                Counter(),
+            )
+        ),
+    )
+    result = ReconciliationResult(
+        transactions=tuple(
+            transaction for item in results for transaction in item.transactions
+        ),
+        exception_cases=cases,
+        summary=summary,
+    )
+    persist_exception_cases(
+        session,
+        result.exception_cases,
+        merchant_id=merchant_id,
+        merchant_id_by_evidence=owner_by_evidence,
+    )
     session.commit()
     return result
 
 
 def review_completed_transaction(
-    session: Session, paypal_order_id: str
-) -> "TransactionReview":
+    session: Session, paypal_order_id: str, *, merchant_id: str | None = None
+) -> TransactionReview:
     """Return a read-only deterministic verification for one persisted order."""
-    from app.schemas.reconciliation import TransactionReview
-
-    order = session.scalar(
-        select(MerchantOrder).where(MerchantOrder.paypal_order_id == paypal_order_id)
+    order_query = select(MerchantOrder).where(
+        MerchantOrder.paypal_order_id == paypal_order_id
     )
+    if merchant_id is not None:
+        order_query = order_query.where(MerchantOrder.merchant_id == merchant_id)
+    order = session.scalar(order_query)
     if order is None:
         raise LookupError("Persisted PayPal order not found.")
     captures = session.scalars(
@@ -85,7 +203,9 @@ def review_completed_transaction(
         for capture in successful
     )
     amount_matches = order.amount is not None and total == order.amount
-    status_matches = (order.status or "").upper() in {"PAID", "COMPLETED"} and bool(successful)
+    status_matches = (order.status or "").upper() in {"PAID", "COMPLETED"} and bool(
+        successful
+    )
     return TransactionReview(
         paypal_order_id=order.paypal_order_id,
         merchant_order_id=_reconciliation_order_id(order),
@@ -96,7 +216,9 @@ def review_completed_transaction(
         order_status=order.status,
         capture_statuses=[capture.status for capture in captures],
         verification_status=(
-            "MATCHED" if amount_matches and currency_matches and status_matches else "INCOMPLETE"
+            "MATCHED"
+            if amount_matches and currency_matches and status_matches
+            else "INCOMPLETE"
         ),
         checks={
             "amount_matches": amount_matches,
@@ -162,8 +284,7 @@ def _webhook_dto(event: WebhookEvent) -> ProvisionalWebhookEvent:
 
 def _complete_order(order: MerchantOrder) -> bool:
     return all(
-        value is not None
-        for value in (order.amount, order.currency, order.status)
+        value is not None for value in (order.amount, order.currency, order.status)
     )
 
 

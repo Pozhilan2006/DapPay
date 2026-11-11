@@ -66,20 +66,28 @@ def collect_investigation_evidence(
 
     orders_by_id: dict[str, MerchantOrder] = {}
     if case.paypal_order_id:
-        order = session.scalar(
-            select(MerchantOrder).where(
-                MerchantOrder.paypal_order_id == case.paypal_order_id
-            )
+        order_query = select(MerchantOrder).where(
+            MerchantOrder.paypal_order_id == case.paypal_order_id
         )
+        if case.merchant_id is not None:
+            order_query = order_query.where(
+                MerchantOrder.merchant_id == case.merchant_id
+            )
+        order = session.scalar(order_query)
         if order is not None:
             orders_by_id[order.paypal_order_id] = order
     if case.merchant_order_id:
-        matching_orders = session.scalars(
+        order_query = (
             select(MerchantOrder)
             .where(MerchantOrder.merchant_reference == case.merchant_order_id)
             .order_by(MerchantOrder.paypal_order_id)
             .limit(_MAX_RELATED_RECORDS + 1)
-        ).all()
+        )
+        if case.merchant_id is not None:
+            order_query = order_query.where(
+                MerchantOrder.merchant_id == case.merchant_id
+            )
+        matching_orders = session.scalars(order_query).all()
         for order in matching_orders:
             orders_by_id[order.paypal_order_id] = order
 
@@ -95,18 +103,25 @@ def collect_investigation_evidence(
             {capture.paypal_capture_id: capture for capture in captures}
         )
     if case.capture_id:
-        capture = session.scalar(
-            select(PaymentCapture).where(
-                PaymentCapture.paypal_capture_id == case.capture_id
-            )
+        capture_query = select(PaymentCapture).where(
+            PaymentCapture.paypal_capture_id == case.capture_id
         )
+        if case.merchant_id is not None:
+            capture_query = capture_query.join(
+                MerchantOrder,
+                MerchantOrder.paypal_order_id == PaymentCapture.paypal_order_id,
+            ).where(MerchantOrder.merchant_id == case.merchant_id)
+        capture = session.scalar(capture_query)
         if capture is not None:
             captures_by_id[capture.paypal_capture_id] = capture
-            order = session.scalar(
-                select(MerchantOrder).where(
-                    MerchantOrder.paypal_order_id == capture.paypal_order_id
-                )
+            order_query = select(MerchantOrder).where(
+                MerchantOrder.paypal_order_id == capture.paypal_order_id
             )
+            if case.merchant_id is not None:
+                order_query = order_query.where(
+                    MerchantOrder.merchant_id == case.merchant_id
+                )
+            order = session.scalar(order_query)
             if order is not None:
                 orders_by_id[order.paypal_order_id] = order
 
@@ -130,13 +145,9 @@ def collect_investigation_evidence(
         or len(webhook_rows) > _MAX_RELATED_RECORDS
     )
     if len(orders_by_id) > _MAX_RELATED_RECORDS:
-        orders_by_id = _limited_mapping(
-            orders_by_id, preferred_id=case.paypal_order_id
-        )
+        orders_by_id = _limited_mapping(orders_by_id, preferred_id=case.paypal_order_id)
     if len(captures_by_id) > _MAX_RELATED_RECORDS:
-        captures_by_id = _limited_mapping(
-            captures_by_id, preferred_id=case.capture_id
-        )
+        captures_by_id = _limited_mapping(captures_by_id, preferred_id=case.capture_id)
     webhook_rows = webhook_rows[:_MAX_RELATED_RECORDS]
     for order in sorted(orders_by_id.values(), key=lambda item: item.paypal_order_id):
         evidence.append(
@@ -213,10 +224,7 @@ def collect_investigation_evidence(
         paypal_payments=payment_dtos,
         webhook_events=webhook_dtos,
     )
-    nodes = [
-        _json_safe(attributes)
-        for _, attributes in graph.nodes
-    ]
+    nodes = [_json_safe(attributes) for _, attributes in graph.nodes]
     edges = [
         {
             "source": source,
@@ -226,9 +234,7 @@ def collect_investigation_evidence(
         for source, target, attributes in graph.edges
     ]
     connected = {
-        node_id
-        for source, target, _ in graph.edges
-        for node_id in (source, target)
+        node_id for source, target, _ in graph.edges for node_id in (source, target)
     }
     disconnected = sorted(
         node_id for node_id, _ in graph.nodes if node_id not in connected
@@ -408,11 +414,7 @@ def _payment_dtos(
         return ()
     result = []
     for capture in captures.values():
-        if (
-            capture.amount is None
-            or capture.currency is None
-            or capture.status is None
-        ):
+        if capture.amount is None or capture.currency is None or capture.status is None:
             continue
         result.append(
             ProvisionalPayPalPayment(

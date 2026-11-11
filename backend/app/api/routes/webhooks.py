@@ -4,11 +4,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
+from app.core.security import Principal, Role, require_roles
 from app.integrations.paypal.client import (
     PayPalApiError,
     PayPalAuthenticationError,
@@ -18,7 +19,7 @@ from app.integrations.paypal.webhooks import (
     extract_transmission_headers,
     validate_webhook_signature,
 )
-from app.models import WebhookEvent
+from app.models import MerchantOrder, PaymentCapture, WebhookEvent
 from app.schemas.persistence import (
     PayPalWebhookEvent,
     WebhookAcknowledgement,
@@ -30,6 +31,7 @@ from app.services.paypal_webhooks import ingest_verified_event
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 logger = logging.getLogger(__name__)
 _MAX_WEBHOOK_BYTES = 1_048_576
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
 
 
 @router.post(
@@ -94,9 +96,7 @@ async def receive_paypal_webhook(
         )
 
     try:
-        inserted = ingest_verified_event(
-            db, payload, paypal_client=paypal_client
-        )
+        inserted = ingest_verified_event(db, payload, paypal_client=paypal_client)
     except PayPalApiError as error:
         db.rollback()
         raise HTTPException(
@@ -139,14 +139,15 @@ def list_webhooks(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> list[WebhookEventSummary]:
     try:
-        events = db.scalars(
-            select(WebhookEvent)
-            .order_by(WebhookEvent.received_at.desc(), WebhookEvent.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
+        query = select(WebhookEvent).order_by(
+            WebhookEvent.received_at.desc(), WebhookEvent.id.desc()
+        )
+        if principal.role != Role.ADMIN:
+            query = query.where(_event_scope(principal.merchant_id))
+        events = db.scalars(query.limit(limit).offset(offset)).all()
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal webhook events.")
         raise HTTPException(
@@ -160,11 +161,13 @@ def list_webhooks(
 def get_webhook(
     event_id: str,
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> WebhookEventResponse:
     try:
-        event = db.scalar(
-            select(WebhookEvent).where(WebhookEvent.paypal_event_id == event_id)
-        )
+        query = select(WebhookEvent).where(WebhookEvent.paypal_event_id == event_id)
+        if principal.role != Role.ADMIN:
+            query = query.where(_event_scope(principal.merchant_id))
+        event = db.scalar(query)
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal webhook event.")
         raise HTTPException(
@@ -194,3 +197,25 @@ def _serialize_event(event: WebhookEvent) -> WebhookEventSummary:
         processing_status=event.processing_status,
         processing_error=event.processing_error,
     )
+
+
+def _event_scope(merchant_id: str):
+    owned_order = exists(
+        select(1).where(
+            MerchantOrder.paypal_order_id == WebhookEvent.resource_id,
+            MerchantOrder.merchant_id == merchant_id,
+        )
+    )
+    owned_capture = exists(
+        select(1)
+        .select_from(PaymentCapture)
+        .join(
+            MerchantOrder,
+            MerchantOrder.paypal_order_id == PaymentCapture.paypal_order_id,
+        )
+        .where(
+            PaymentCapture.paypal_capture_id == WebhookEvent.resource_id,
+            MerchantOrder.merchant_id == merchant_id,
+        )
+    )
+    return or_(owned_order, owned_capture)

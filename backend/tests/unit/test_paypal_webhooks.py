@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.routes import webhooks as webhook_routes
 from app.api.routes.orders import list_orders
 from app.core.config import Settings
+from app.core.security import Principal, Role
 from app.integrations.paypal.client import (
     PayPalApiError,
     PayPalClient,
@@ -250,7 +251,24 @@ def test_successful_webhook_is_persisted_with_sensitive_fields_scrubbed(
     assert stored.occurred_at is not None and stored.occurred_at.tzinfo is not None
     assert stored.received_at.tzinfo is not None
     assert "payer" not in stored.raw_payload["resource"]
-    assert "email_address" not in stored.raw_payload["resource"]["purchase_units"][0]["payee"]
+    assert (
+        "email_address"
+        not in stored.raw_payload["resource"]["purchase_units"][0]["payee"]
+    )
+
+
+def test_paypal_signature_is_the_webhook_posts_authentication(api_client, monkeypatch):
+    verifier = SignatureClient()
+    monkeypatch.setattr(webhook_routes, "PayPalClient", lambda: verifier)
+
+    response = api_client.post(
+        "/api/webhooks/paypal",
+        json=_event("EVENT-WEBHOOK-AUTH", "UNSUPPORTED.EVENT"),
+        headers={**SIGNATURE_HEADERS, "Authorization": ""},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["duplicate"] is False
     assert verifier.calls == 1
 
 
@@ -335,9 +353,7 @@ def test_capture_events_persist_decimal_amounts(
     result = ingest_verified_event(
         db_session,
         _capture_event("EVENT-" + expected_status, event_type),
-        paypal_client=(
-            AuthoritativeOrderClient()
-        ),
+        paypal_client=(AuthoritativeOrderClient()),
         received_at=datetime(2026, 11, 11, tzinfo=timezone.utc),
     )
     assert result
@@ -373,9 +389,7 @@ def test_late_pending_event_does_not_downgrade_completed_capture(
     capture = db_session.scalar(select(PaymentCapture))
     assert capture is not None
     assert capture.status == "COMPLETED"
-    assert capture.paypal_updated_at == datetime(
-        2026, 11, 11, tzinfo=timezone.utc
-    )
+    assert capture.paypal_updated_at == datetime(2026, 11, 11, tzinfo=timezone.utc)
 
 
 def test_completed_webhook_does_not_override_authoritative_pending_status(
@@ -457,7 +471,16 @@ def test_database_unavailable_returns_service_unavailable():
             raise OperationalError("SELECT", {}, OSError("database unavailable"))
 
     with pytest.raises(HTTPException) as error:
-        list_orders(limit=50, offset=0, db=UnavailableSession())
+        list_orders(
+            limit=50,
+            offset=0,
+            db=UnavailableSession(),
+            principal=Principal(
+                subject="unit-test",
+                role=Role.ADMIN,
+                merchant_id=None,
+            ),
+        )
     assert error.value.status_code == 503
 
 
@@ -470,7 +493,10 @@ def test_event_details_api_exposes_no_payer_contact_data(
     payload = _event(
         "EVENT-DETAIL",
         "UNKNOWN.EVENT",
-        resource={"id": "RESOURCE-1", "payer": {"email_address": "private@example.test"}},
+        resource={
+            "id": "RESOURCE-1",
+            "payer": {"email_address": "private@example.test"},
+        },
     )
     api_client.post("/api/webhooks/paypal", json=payload, headers=SIGNATURE_HEADERS)
     response = api_client.get("/api/webhooks/EVENT-DETAIL")

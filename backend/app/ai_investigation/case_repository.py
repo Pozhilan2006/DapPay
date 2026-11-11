@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -12,7 +12,11 @@ from app.reconciliation.rules import ExceptionCase
 
 
 def persist_exception_cases(
-    session: Session, cases: tuple[ExceptionCase, ...] | list[ExceptionCase]
+    session: Session,
+    cases: tuple[ExceptionCase, ...] | list[ExceptionCase],
+    *,
+    merchant_id: str | None = None,
+    merchant_id_by_evidence: Mapping[str, str] | None = None,
 ) -> None:
     """Append stable reconciliation cases for investigation lookup.
 
@@ -21,14 +25,30 @@ def persist_exception_cases(
     overwritten. The savepoint also makes a concurrent repeat insert harmless.
     """
     for case in cases:
+        owner = merchant_id
+        if owner is None and merchant_id_by_evidence is not None:
+            owners = {
+                merchant_id_by_evidence[item]
+                for item in case.evidence_identifiers
+                if item in merchant_id_by_evidence
+            }
+            if case.paypal_order_id in merchant_id_by_evidence:
+                owners.add(merchant_id_by_evidence[case.paypal_order_id])
+            if case.capture_id in merchant_id_by_evidence:
+                owners.add(merchant_id_by_evidence[case.capture_id])
+            if len(owners) == 1:
+                owner = owners.pop()
         existing = session.get(ReconciliationExceptionRecord, case.case_id)
         if existing is not None:
+            if owner is not None and existing.merchant_id not in {None, owner}:
+                raise ValueError("Reconciliation case ownership conflict.")
             continue
         try:
             with session.begin_nested():
                 session.add(
                     ReconciliationExceptionRecord(
                         case_id=case.case_id,
+                        merchant_id=owner,
                         exception_type=case.exception_type.value,
                         severity=case.severity.value,
                         merchant_order_id=case.merchant_order_id,
@@ -45,8 +65,12 @@ def persist_exception_cases(
                 )
                 session.flush()
         except IntegrityError:
-            # Another reconciliation worker inserted the same stable case ID.
-            # Keeping the original immutable observation is the idempotent path.
+            concurrent = session.get(ReconciliationExceptionRecord, case.case_id)
+            if concurrent is None or (
+                owner is not None
+                and concurrent.merchant_id not in {None, owner}
+            ):
+                raise ValueError("Reconciliation case ownership conflict.") from None
             continue
 
 

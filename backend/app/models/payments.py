@@ -26,6 +26,9 @@ class MerchantOrder(Base):
     __tablename__ = "merchant_orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    merchant_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
     paypal_order_id: Mapped[str] = mapped_column(String(128), unique=True)
     merchant_reference: Mapped[str | None] = mapped_column(String(127), nullable=True)
     invoice_id: Mapped[str | None] = mapped_column(String(127), nullable=True)
@@ -75,9 +78,7 @@ class PaymentCapture(Base):
     paypal_updated_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(), nullable=True
     )
-    source_reference: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    source_reference: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=_utc_now, nullable=False
     )
@@ -113,6 +114,9 @@ class ReconciliationExceptionRecord(Base):
     __tablename__ = "reconciliation_exception_cases"
 
     case_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    merchant_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
     exception_type: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False)
     merchant_order_id: Mapped[str | None] = mapped_column(String(128))
@@ -152,9 +156,7 @@ class InvestigationReportRecord(Base):
     confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
     confidence_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
     recommended_action: Mapped[str | None] = mapped_column(Text, nullable=True)
-    requires_human_approval: Mapped[bool] = mapped_column(
-        default=True, nullable=False
-    )
+    requires_human_approval: Mapped[bool] = mapped_column(default=True, nullable=False)
     llm_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)

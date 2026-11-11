@@ -63,8 +63,10 @@ class InvestigationService:
         self._clock = clock
         self._max_attempts = max_attempts
 
-    def validate(self, session: Session, case_id: str) -> InvestigationValidationResult:
-        case = self._get_case(session, case_id)
+    def validate(
+        self, session: Session, case_id: str, *, merchant_id: str | None = None
+    ) -> InvestigationValidationResult:
+        case = self._get_case(session, case_id, merchant_id=merchant_id)
         snapshot, analysis = self._collect_and_analyze(session, case)
         return InvestigationValidationResult(
             case_id=case.case_id,
@@ -78,8 +80,10 @@ class InvestigationService:
             validated_at=self._clock(),
         )
 
-    async def run(self, session: Session, case_id: str) -> InvestigationReport:
-        case = self._get_case(session, case_id)
+    async def run(
+        self, session: Session, case_id: str, *, merchant_id: str | None = None
+    ) -> InvestigationReport:
+        case = self._get_case(session, case_id, merchant_id=merchant_id)
         snapshot, analysis = self._collect_and_analyze(session, case)
         metadata = {
             "case_id": case.case_id,
@@ -150,9 +154,7 @@ class InvestigationService:
             issue_type=case.exception_type,
             severity=case.severity,
             investigation_status=(
-                "COMPLETED"
-                if response.probable_cause is not None
-                else "INCONCLUSIVE"
+                "COMPLETED" if response.probable_cause is not None else "INCONCLUSIVE"
             ),
             probable_cause=response.probable_cause,
             findings=findings,
@@ -184,13 +186,16 @@ class InvestigationService:
         return report
 
     def _get_case(
-        self, session: Session, case_id: str
+        self, session: Session, case_id: str, *, merchant_id: str | None = None
     ) -> ReconciliationExceptionRecord:
-        case = session.scalar(
-            select(ReconciliationExceptionRecord).where(
-                ReconciliationExceptionRecord.case_id == case_id
-            )
+        query = select(ReconciliationExceptionRecord).where(
+            ReconciliationExceptionRecord.case_id == case_id
         )
+        if merchant_id is not None:
+            query = query.where(
+                ReconciliationExceptionRecord.merchant_id == merchant_id
+            )
+        case = session.scalar(query)
         if case is None:
             raise InvestigationCaseNotFound("Reconciliation exception case not found.")
         return case
@@ -256,6 +261,7 @@ class InvestigationService:
             },
         )
 
+
 def _record_from_report(
     report: InvestigationReport,
     snapshot: InvestigationEvidenceSnapshot,
@@ -303,8 +309,7 @@ def report_from_record(record: InvestigationReportRecord) -> InvestigationReport
         conflicting_evidence=record.conflicting_evidence,
         confidence=record.confidence or "LOW",
         confidence_basis=record.confidence_basis or "Confidence basis unavailable.",
-        recommended_action=record.recommended_action
-        or "Review evidence manually.",
+        recommended_action=record.recommended_action or "Review evidence manually.",
         requires_human_approval=True,
         investigated_at=record.investigated_at,
         model_metadata={

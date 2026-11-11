@@ -59,9 +59,13 @@ workflow are present. Reconciliation persists only genuine deterministic
 exception cases, keyed by stable case IDs. Completed matching payments can be
 checked through the read-only transaction-review endpoint without being
 misclassified as exceptions. Merchant-side, accounting, fulfillment,
-refund-level integrations and application authentication remain incomplete.
+refund-level integrations remain incomplete. API bearer-token verification and
+role/tenant authorization are implemented; production still requires an
+externally managed token issuer and verified legacy ownership mapping.
 The frontend investigation screen still uses demonstration data and is not
 connected to the investigation API.
 
 See [AI root-cause investigation](docs/ai-root-cause-investigation.md) for
 workflow details, API routes, local setup, coverage, and limitations.
+See [API authentication](docs/api-authentication.md) for bearer-token setup,
+role rules, tenant isolation, and legacy data onboarding.

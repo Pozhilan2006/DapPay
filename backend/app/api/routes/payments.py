@@ -6,11 +6,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
-from app.models import PaymentCapture
+from app.core.security import Principal, Role, require_roles
+from app.models import MerchantOrder, PaymentCapture
 from app.schemas.persistence import PaymentCaptureResponse
 
 router = APIRouter(prefix="/payments", tags=["Payments"])
 logger = logging.getLogger(__name__)
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
 
 
 @router.get("")
@@ -18,14 +20,20 @@ def list_payments(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> list[PaymentCaptureResponse]:
     try:
-        captures = db.scalars(
+        query = (
             select(PaymentCapture)
+            .join(
+                MerchantOrder,
+                MerchantOrder.paypal_order_id == PaymentCapture.paypal_order_id,
+            )
             .order_by(PaymentCapture.created_at.desc(), PaymentCapture.id.desc())
-            .limit(limit)
-            .offset(offset)
-        ).all()
+        )
+        if principal.role != Role.ADMIN:
+            query = query.where(MerchantOrder.merchant_id == principal.merchant_id)
+        captures = db.scalars(query.limit(limit).offset(offset)).all()
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal captures.")
         raise HTTPException(
@@ -39,13 +47,20 @@ def list_payments(
 def get_payment(
     payment_id: str = Path(min_length=1, max_length=128),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> PaymentCaptureResponse:
     try:
-        capture = db.scalar(
-            select(PaymentCapture).where(
-                PaymentCapture.paypal_capture_id == payment_id
+        query = (
+            select(PaymentCapture)
+            .join(
+                MerchantOrder,
+                MerchantOrder.paypal_order_id == PaymentCapture.paypal_order_id,
             )
+            .where(PaymentCapture.paypal_capture_id == payment_id)
         )
+        if principal.role != Role.ADMIN:
+            query = query.where(MerchantOrder.merchant_id == principal.merchant_id)
+        capture = db.scalar(query)
     except SQLAlchemyError:
         logger.error("Unable to read persisted PayPal capture.")
         raise HTTPException(

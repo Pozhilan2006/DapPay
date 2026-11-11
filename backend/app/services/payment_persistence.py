@@ -58,6 +58,7 @@ def upsert_order(
     session: Session,
     *,
     paypal_order_id: str,
+    merchant_id: str | None = None,
     merchant_reference: str | None = None,
     invoice_id: str | None = None,
     amount: Decimal | None = None,
@@ -73,9 +74,16 @@ def upsert_order(
         .with_for_update()
     )
     if order is None:
-        order = MerchantOrder(paypal_order_id=paypal_order_id)
+        order = MerchantOrder(
+            paypal_order_id=paypal_order_id,
+            merchant_id=merchant_id,
+        )
         session.add(order)
         session.flush()
+    elif merchant_id is not None:
+        if order.merchant_id not in {None, merchant_id}:
+            raise ValueError("PayPal order is already assigned to another merchant.")
+        order.merchant_id = merchant_id
 
     incoming_is_older = (
         paypal_updated_at is not None
@@ -99,8 +107,7 @@ def upsert_order(
     if paypal_created_at is not None and order.paypal_created_at is None:
         order.paypal_created_at = paypal_created_at
     if paypal_updated_at is not None and (
-        order.paypal_updated_at is None
-        or paypal_updated_at > order.paypal_updated_at
+        order.paypal_updated_at is None or paypal_updated_at > order.paypal_updated_at
     ):
         order.paypal_updated_at = paypal_updated_at
     order.updated_at = datetime.now(timezone.utc)
@@ -161,19 +168,13 @@ def upsert_capture(
         )
         existing_rank = _CAPTURE_STATUS_RANK.get(capture.status.upper(), 0)
         incoming_rank = _CAPTURE_STATUS_RANK.get(status.upper(), 0)
-        if (
-            not incoming_time_is_older
-            and incoming_rank >= existing_rank
-        ):
+        if not incoming_time_is_older and incoming_rank >= existing_rank:
             capture.status = status
         if amount is not None:
             capture.amount = amount
         if currency is not None:
             capture.currency = currency
-        if (
-            paypal_created_at is not None
-            and capture.paypal_created_at is None
-        ):
+        if paypal_created_at is not None and capture.paypal_created_at is None:
             capture.paypal_created_at = paypal_created_at
         if paypal_updated_at is not None and (
             capture.paypal_updated_at is None
@@ -183,7 +184,9 @@ def upsert_capture(
         if source_reference is not None:
             capture.source_reference = sanitize_event_payload(source_reference)
         if refund_amount is not None and refund_amount > 0:
-            capture.refunded_amount = (capture.refunded_amount or Decimal("0")) + refund_amount
+            capture.refunded_amount = (
+                capture.refunded_amount or Decimal("0")
+            ) + refund_amount
             if capture.amount is not None and capture.refunded_amount >= capture.amount:
                 capture.status = "REFUNDED"
         capture.updated_at = datetime.now(timezone.utc)

@@ -16,6 +16,7 @@ from app.ai_investigation.service import (
     report_from_record,
 )
 from app.database.session import get_db
+from app.core.security import Principal, Role, require_roles
 from app.models import InvestigationReportRecord, ReconciliationExceptionRecord
 from app.schemas.reconciliation import TransactionReview
 from app.services.reconciliation_workflow import review_completed_transaction
@@ -23,6 +24,8 @@ from app.services.reconciliation_workflow import review_completed_transaction
 router = APIRouter(prefix="/investigations", tags=["Investigations"])
 logger = logging.getLogger(__name__)
 _CASE_ID_PATTERN = r"^recon_[a-f0-9]{20}$"
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
+_WRITE_ROLES = (Role.ADMIN, Role.MERCHANT)
 
 
 @router.post(
@@ -32,10 +35,17 @@ _CASE_ID_PATTERN = r"^recon_[a-f0-9]{20}$"
 def review_transaction(
     paypal_order_id: str = Path(min_length=1, max_length=128),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> TransactionReview:
     """Verify a completed payment without representing it as an exception."""
     try:
-        return review_completed_transaction(db, paypal_order_id)
+        return review_completed_transaction(
+            db,
+            paypal_order_id,
+            merchant_id=(
+                None if principal.role == Role.ADMIN else principal.merchant_id
+            ),
+        )
     except LookupError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -57,9 +67,16 @@ def review_transaction(
 async def run_investigation(
     case_id: str = Path(min_length=1, max_length=64, pattern=_CASE_ID_PATTERN),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_WRITE_ROLES)),
 ) -> InvestigationReport:
     try:
-        return await InvestigationService().run(db, case_id)
+        return await InvestigationService().run(
+            db,
+            case_id,
+            merchant_id=(
+                None if principal.role == Role.ADMIN else principal.merchant_id
+            ),
+        )
     except InvestigationCaseNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -90,9 +107,16 @@ async def run_investigation(
 def validate_investigation_evidence(
     case_id: str = Path(min_length=1, max_length=64, pattern=_CASE_ID_PATTERN),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> InvestigationValidationResult:
     try:
-        return InvestigationService().validate(db, case_id)
+        return InvestigationService().validate(
+            db,
+            case_id,
+            merchant_id=(
+                None if principal.role == Role.ADMIN else principal.merchant_id
+            ),
+        )
     except InvestigationCaseNotFound:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -121,9 +145,17 @@ def get_investigation_history(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> list[InvestigationReport]:
     try:
-        if db.get(ReconciliationExceptionRecord, case_id) is None:
+        case_query = select(ReconciliationExceptionRecord).where(
+            ReconciliationExceptionRecord.case_id == case_id
+        )
+        if principal.role != Role.ADMIN:
+            case_query = case_query.where(
+                ReconciliationExceptionRecord.merchant_id == principal.merchant_id
+            )
+        if db.scalar(case_query) is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Reconciliation exception case not found.",
@@ -154,9 +186,23 @@ def get_investigation_history(
 def get_investigation_report(
     report_id: str = Path(min_length=1, max_length=36),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> InvestigationReport:
     try:
-        report = db.get(InvestigationReportRecord, report_id)
+        query = (
+            select(InvestigationReportRecord)
+            .join(
+                ReconciliationExceptionRecord,
+                ReconciliationExceptionRecord.case_id
+                == InvestigationReportRecord.case_id,
+            )
+            .where(InvestigationReportRecord.report_id == report_id)
+        )
+        if principal.role != Role.ADMIN:
+            query = query.where(
+                ReconciliationExceptionRecord.merchant_id == principal.merchant_id
+            )
+        report = db.scalar(query)
     except SQLAlchemyError:
         logger.error("Investigation report could not be read.")
         raise HTTPException(
@@ -178,10 +224,16 @@ def get_investigation_report(
 def get_latest_investigation(
     case_id: str = Path(min_length=1, max_length=64, pattern=_CASE_ID_PATTERN),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> InvestigationReport:
     try:
-        report = db.scalar(
+        query = (
             select(InvestigationReportRecord)
+            .join(
+                ReconciliationExceptionRecord,
+                ReconciliationExceptionRecord.case_id
+                == InvestigationReportRecord.case_id,
+            )
             .where(InvestigationReportRecord.case_id == case_id)
             .order_by(
                 InvestigationReportRecord.created_at.desc(),
@@ -189,6 +241,11 @@ def get_latest_investigation(
             )
             .limit(1)
         )
+        if principal.role != Role.ADMIN:
+            query = query.where(
+                ReconciliationExceptionRecord.merchant_id == principal.merchant_id
+            )
+        report = db.scalar(query)
     except SQLAlchemyError:
         logger.error("Latest investigation report could not be read.")
         raise HTTPException(

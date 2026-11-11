@@ -1,16 +1,19 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Path, status
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
+from app.core.security import Principal, Role, require_roles
 from app.integrations.paypal.client import (
     PayPalApiError,
     PayPalAuthenticationError,
     PayPalClient,
 )
 from app.integrations.paypal.orders import capture_order, create_order, get_order
+from app.models import MerchantOrder
 from app.schemas.paypal import (
     CapturePayPalOrderResponse,
     CreatePayPalOrderRequest,
@@ -23,6 +26,8 @@ from app.services.payment_persistence import upsert_capture, upsert_order
 
 router = APIRouter(prefix="/paypal", tags=["PayPal"])
 logger = logging.getLogger(__name__)
+_WRITE_ROLES = (Role.ADMIN, Role.MERCHANT)
+_READ_ROLES = (Role.ADMIN, Role.MERCHANT, Role.READ_ONLY)
 
 
 @router.post(
@@ -33,6 +38,7 @@ logger = logging.getLogger(__name__)
 def create_paypal_order(
     request: CreatePayPalOrderRequest,
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_WRITE_ROLES)),
 ) -> CreatePayPalOrderResponse:
     try:
         order = create_order(
@@ -63,6 +69,9 @@ def create_paypal_order(
         upsert_order(
             db,
             paypal_order_id=order.order_id,
+            merchant_id=(
+                principal.merchant_id if principal.role == Role.MERCHANT else None
+            ),
             merchant_reference=request.merchant_reference,
             invoice_id=request.invoice_id,
             amount=request.amount,
@@ -78,6 +87,13 @@ def create_paypal_order(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Order persistence is temporarily unavailable.",
         ) from None
+    except ValueError:
+        db.rollback()
+        logger.error("PayPal order ownership conflicted during persistence.")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Order could not be assigned to this merchant.",
+        ) from None
     return CreatePayPalOrderResponse(
         order_id=order.order_id,
         status=order.status,
@@ -92,7 +108,20 @@ def create_paypal_order(
 def capture_paypal_order(
     order_id: str = Path(min_length=1, max_length=128),
     db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_WRITE_ROLES)),
 ) -> CapturePayPalOrderResponse:
+    if principal.role != Role.ADMIN:
+        owned_order = db.scalar(
+            select(MerchantOrder.paypal_order_id).where(
+                MerchantOrder.paypal_order_id == order_id,
+                MerchantOrder.merchant_id == principal.merchant_id,
+            )
+        )
+        if owned_order is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found.",
+            )
     try:
         capture = capture_order(order_id, client=PayPalClient())
     except PayPalAuthenticationError as error:
@@ -146,7 +175,21 @@ def capture_paypal_order(
 )
 def get_paypal_order(
     order_id: str = Path(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_roles(*_READ_ROLES)),
 ) -> PayPalOrderResponse:
+    if principal.role != Role.ADMIN:
+        owned_order = db.scalar(
+            select(MerchantOrder.paypal_order_id).where(
+                MerchantOrder.paypal_order_id == order_id,
+                MerchantOrder.merchant_id == principal.merchant_id,
+            )
+        )
+        if owned_order is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Order not found.",
+            )
     try:
         order = get_order(order_id, client=PayPalClient())
     except PayPalAuthenticationError as error:
