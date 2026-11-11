@@ -3,11 +3,11 @@
 ## Status and scope
 
 The backend has a bounded, evidence-grounded investigation workflow built on
-the current PayPal persistence models. It is not production-ready or a
-demonstrated investigation of a live Sandbox transaction. The reconciliation
-engine still runs on caller-supplied provisional DTOs and does not persist its
-exception cases; a producer must call `persist_exception_cases()` before an
-exception can be investigated through the API.
+the current PayPal persistence models. The pure reconciliation engine still
+accepts provisional DTOs, while `run_persisted_reconciliation()` converts the
+persisted PayPal orders, captures, and verified webhooks into those DTOs and
+persists only the resulting genuine exception cases. Stable engine case IDs are
+the persistence primary keys, making repeat runs idempotent.
 
 The investigation service never performs payment operations or changes a
 payment, order, refund, accounting record, or exception status. Reports are
@@ -33,6 +33,15 @@ the existing `httpx` dependency, not a second general-purpose provider
 framework. No provider credentials are configured or required by unit tests.
 
 ## Architecture and workflow
+
+`POST /api/reconciliation/run` is the production integration boundary. It
+commits the reconciliation cases in the same database transaction after the
+engine has returned them; a successful normal payment therefore produces no
+case. `POST /api/investigations/reviews/orders/{paypal_order_id}` is a separate,
+read-only completed-payment verification. It never creates a case or report,
+and does not invoke the LLM. Exception investigations remain available at
+`/api/investigations/{case_id}/run`, with evidence validation and append-only
+report history under that case.
 
 1. A persisted reconciliation case ID is validated.
 2. The evidence collector queries only PayPal order/capture IDs and exact

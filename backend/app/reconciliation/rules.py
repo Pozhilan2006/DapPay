@@ -317,6 +317,9 @@ def reconcile_transaction(
                     paypal_order_id=_single_or_none(
                         payment.paypal_order_id for payment in comparable
                     ),
+                    capture_id=_single_or_none(
+                        payment.paypal_capture_id for payment in comparable
+                    ),
                     expected_value=order.expected_amount,
                     actual_value=actual_total,
                     evidence_identifiers=_all_payment_evidence(comparable)
@@ -339,6 +342,9 @@ def reconcile_transaction(
                     merchant_order_id=order.merchant_order_id,
                     paypal_order_id=_single_or_none(
                         payment.paypal_order_id for payment in comparable
+                    ),
+                    capture_id=_single_or_none(
+                        payment.paypal_capture_id for payment in comparable
                     ),
                     expected_value="paid",
                     actual_value=order.order_status,

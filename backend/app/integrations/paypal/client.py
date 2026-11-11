@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -139,8 +140,11 @@ class PayPalClient:
         try:
             response = http_client.post(
                 f"{self.get_base_url().rstrip('/')}/v1/notifications/verify-webhook-signature",
-                json=payload,
-                headers={"Authorization": f"Bearer {token.access_token}"},
+                content=json.dumps(payload, separators=(",", ":")),
+                headers={
+                    "Authorization": f"Bearer {token.access_token}",
+                    "Content-Type": "application/json",
+                },
                 timeout=self._timeout,
             )
         except httpx.TimeoutException:
@@ -221,10 +225,11 @@ class PayPalClient:
         try:
             response = http_client.post(
                 f"{self.get_base_url().rstrip('/')}/v2/checkout/{endpoint}",
-                json=payload,
+                content=json.dumps(payload, separators=(",", ":")),
                 headers={
                     "Authorization": f"Bearer {token.access_token}",
                     "PayPal-Request-Id": request_id,
+                    "Content-Type": "application/json",
                 },
                 timeout=self._timeout,
             )

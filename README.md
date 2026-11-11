@@ -53,10 +53,12 @@ docker compose up --build
 
 ## Current status
 
-PayPal order/capture persistence, webhook ingestion, reconciliation, lineage,
-and an initial evidence-grounded backend investigation workflow are present.
-The investigation API requires persisted exception cases, which are not yet
-produced by the reconciliation API. Merchant-side, accounting, fulfillment,
+PayPal order/capture persistence, webhook ingestion, database-backed
+reconciliation, lineage, and an evidence-grounded backend investigation
+workflow are present. Reconciliation persists only genuine deterministic
+exception cases, keyed by stable case IDs. Completed matching payments can be
+checked through the read-only transaction-review endpoint without being
+misclassified as exceptions. Merchant-side, accounting, fulfillment,
 refund-level integrations and application authentication remain incomplete.
 The frontend investigation screen still uses demonstration data and is not
 connected to the investigation API.

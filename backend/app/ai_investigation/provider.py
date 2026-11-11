@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -10,6 +12,9 @@ from pydantic import ValidationError
 from app.ai_investigation.prompts import SYSTEM_PROMPT
 from app.ai_investigation.schemas import LLMInvestigationResponse
 from app.core.config import Settings
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class InvestigationProviderError(RuntimeError):
@@ -57,6 +62,7 @@ class OllamaInvestigationProvider:
         client = self._client or httpx.AsyncClient(
             timeout=self._settings.investigation_llm_timeout_seconds
         )
+        started = time.monotonic()
         try:
             response = await client.post(
                 f"{base_url}/api/chat",
@@ -73,14 +79,29 @@ class OllamaInvestigationProvider:
             response.raise_for_status()
             payload = response.json()
         except httpx.TimeoutException:
+            logger.warning(
+                "Ollama investigation request timed out model=%s duration_seconds=%.3f",
+                self._settings.ollama_model,
+                time.monotonic() - started,
+            )
             raise InvestigationProviderError(
                 "Investigation provider timed out."
             ) from None
         except httpx.HTTPError:
+            logger.warning(
+                "Ollama investigation request failed model=%s duration_seconds=%.3f",
+                self._settings.ollama_model,
+                time.monotonic() - started,
+            )
             raise InvestigationProviderError(
                 "Investigation provider is unavailable."
             ) from None
         except (ValueError, json.JSONDecodeError):
+            logger.warning(
+                "Ollama investigation response was invalid model=%s duration_seconds=%.3f",
+                self._settings.ollama_model,
+                time.monotonic() - started,
+            )
             raise InvestigationProviderError(
                 "Investigation provider returned invalid JSON."
             ) from None
@@ -92,8 +113,19 @@ class OllamaInvestigationProvider:
             if not isinstance(content, str):
                 raise TypeError
             parsed_content = json.loads(content)
-            return LLMInvestigationResponse.model_validate(parsed_content)
+            parsed_response = LLMInvestigationResponse.model_validate(parsed_content)
+            logger.info(
+                "Ollama investigation response validated model=%s duration_seconds=%.3f",
+                self._settings.ollama_model,
+                time.monotonic() - started,
+            )
+            return parsed_response
         except (KeyError, TypeError, ValueError, ValidationError):
+            logger.warning(
+                "Ollama investigation response was malformed model=%s duration_seconds=%.3f",
+                self._settings.ollama_model,
+                time.monotonic() - started,
+            )
             raise InvestigationProviderError(
                 "Investigation provider returned a malformed structured response."
             ) from None

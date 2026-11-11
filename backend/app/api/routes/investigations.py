@@ -17,10 +17,36 @@ from app.ai_investigation.service import (
 )
 from app.database.session import get_db
 from app.models import InvestigationReportRecord, ReconciliationExceptionRecord
+from app.schemas.reconciliation import TransactionReview
+from app.services.reconciliation_workflow import review_completed_transaction
 
 router = APIRouter(prefix="/investigations", tags=["Investigations"])
 logger = logging.getLogger(__name__)
 _CASE_ID_PATTERN = r"^recon_[a-f0-9]{20}$"
+
+
+@router.post(
+    "/reviews/orders/{paypal_order_id}",
+    response_model=TransactionReview,
+)
+def review_transaction(
+    paypal_order_id: str = Path(min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+) -> TransactionReview:
+    """Verify a completed payment without representing it as an exception."""
+    try:
+        return review_completed_transaction(db, paypal_order_id)
+    except LookupError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Persisted PayPal order not found.",
+        ) from None
+    except SQLAlchemyError:
+        logger.error("Transaction review source data could not be read.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Transaction review storage is temporarily unavailable.",
+        ) from None
 
 
 @router.post(

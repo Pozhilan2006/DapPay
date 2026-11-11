@@ -2,7 +2,7 @@
 
 from collections import Counter
 from dataclasses import replace
-from typing import Callable, Hashable, Iterable
+from typing import Any, Callable, Hashable, Iterable
 
 from app.reconciliation.rules import (
     ExceptionCase,
