@@ -1,38 +1,42 @@
-﻿version: "3.9"
-
 services:
   db:
     image: postgres:16-alpine
     container_name: payrecon-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: payrecon
-      POSTGRES_USER: payrecon
-      POSTGRES_PASSWORD: payrecon
+      POSTGRES_DB: ${POSTGRES_DB:-payrecon}
+      POSTGRES_USER: ${POSTGRES_USER:-payrecon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD before starting Docker Compose}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build:
       context: ./backend
     container_name: payrecon-backend
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+psycopg://payrecon:payrecon@db:5432/payrecon
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payrecon}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payrecon}
       APP_ENV: development
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ./backend:/app
 
   frontend:
     image: node:20-alpine
-    container_name: payrecon-frontend
     working_dir: /app
     command: sh -c "npm install && npm run dev"
     volumes:
