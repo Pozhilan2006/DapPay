@@ -9,9 +9,21 @@ from sqlalchemy.pool import StaticPool
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
-from app.models import MerchantOrder, PaymentCapture, WebhookEvent
+from app.models import (
+    InvestigationReportRecord,
+    MerchantOrder,
+    PaymentCapture,
+    ReconciliationExceptionRecord,
+    WebhookEvent,
+)
 
-_registered_models = (MerchantOrder, PaymentCapture, WebhookEvent)
+_registered_models = (
+    InvestigationReportRecord,
+    MerchantOrder,
+    PaymentCapture,
+    ReconciliationExceptionRecord,
+    WebhookEvent,
+)
 assert {model.__tablename__ for model in _registered_models}.issubset(
     Base.metadata.tables
 )

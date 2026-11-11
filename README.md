@@ -53,4 +53,13 @@ docker compose up --build
 
 ## Current status
 
-This repository is intentionally scaffolded as a foundation. The core business logic, data models, and operational workflows are placeholders ready for implementation.
+PayPal order/capture persistence, webhook ingestion, reconciliation, lineage,
+and an initial evidence-grounded backend investigation workflow are present.
+The investigation API requires persisted exception cases, which are not yet
+produced by the reconciliation API. Merchant-side, accounting, fulfillment,
+refund-level integrations and application authentication remain incomplete.
+The frontend investigation screen still uses demonstration data and is not
+connected to the investigation API.
+
+See [AI root-cause investigation](docs/ai-root-cause-investigation.md) for
+workflow details, API routes, local setup, coverage, and limitations.

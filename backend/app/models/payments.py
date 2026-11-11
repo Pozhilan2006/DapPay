@@ -107,3 +107,62 @@ class WebhookEvent(Base):
     processing_status: Mapped[str] = mapped_column(String(32), nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ReconciliationExceptionRecord(Base):
+    __tablename__ = "reconciliation_exception_cases"
+
+    case_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    exception_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    merchant_order_id: Mapped[str | None] = mapped_column(String(128))
+    paypal_order_id: Mapped[str | None] = mapped_column(String(128))
+    capture_id: Mapped[str | None] = mapped_column(String(128))
+    expected_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    actual_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    evidence_identifiers: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    case_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=_utc_now, nullable=False
+    )
+
+
+class InvestigationReportRecord(Base):
+    __tablename__ = "investigation_reports"
+    __table_args__ = (
+        Index("ix_investigation_reports_case_created", "case_id", "created_at"),
+    )
+
+    report_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    case_id: Mapped[str] = mapped_column(
+        ForeignKey("reconciliation_exception_cases.case_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    investigation_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    issue_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    probable_cause: Mapped[str | None] = mapped_column(Text, nullable=True)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    missing_evidence: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    conflicting_evidence: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    evidence_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    deterministic_analysis: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    confidence_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recommended_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requires_human_approval: Mapped[bool] = mapped_column(
+        default=True, nullable=False
+    )
+    llm_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    validation_errors: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    investigated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=_utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=_utc_now, onupdate=_utc_now, nullable=False
+    )

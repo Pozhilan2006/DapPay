@@ -1,7 +1,5 @@
-﻿"""Structured output schema for AI investigation responses."""
+from app.ai_investigation.schemas import LLMInvestigationResponse
 
 
-def response_schema() -> dict[str, list[str]]:
-    return {
-        "required_fields": ["summary", "root_cause", "recommendations", "confidence"],
-    }
+def response_schema() -> dict[str, object]:
+    return LLMInvestigationResponse.model_json_schema()

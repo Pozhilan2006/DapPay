@@ -48,6 +48,7 @@ def test_amount_mismatch_uses_decimal_total():
 
     assert case.expected_value == Decimal("100.00")
     assert case.actual_value == Decimal("90.00")
+    assert "-10.00 USD" in case.explanation
     assert case.severity == Severity.HIGH
 
 
@@ -129,15 +130,302 @@ def test_matching_refund_totals_do_not_create_exception():
         **scenario.paypal_refund_records[0],
         "amount": Decimal("10.00"),
     }
+    business_record = scenario.business_records[0].model_copy(
+        update={
+            "accounting_entries": [
+                {
+                    "paypal_refund_id": "SYNTH-PAYPAL-REFUND-001",
+                    "amount": Decimal("10.00"),
+                    "currency": "USD",
+                }
+            ]
+        }
+    )
 
     result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
         scenario.merchant_orders,
         scenario.paypal_payments,
-        scenario.business_records,
+        (business_record,),
         paypal_refund_records=(matching_paypal_refund,),
     )
 
     assert ExceptionType.REFUND_MISMATCH not in _types(result)
+    assert ExceptionType.MISSING_ACCOUNTING_ENTRY not in _types(result)
+
+
+def test_paypal_refund_without_accounting_entry_is_reported():
+    result = _run("refund_discrepancy")
+    case = next(
+        case
+        for case in result.exception_cases
+        if case.exception_type == ExceptionType.MISSING_ACCOUNTING_ENTRY
+    )
+
+    assert case.capture_id == "SYNTH-CAPTURE-001"
+    assert "SYNTH-PAYPAL-REFUND-001" in case.evidence_identifiers
+    assert case.expected_value == {
+        "refund_id": "SYNTH-PAYPAL-REFUND-001",
+        "amount": Decimal("8.00"),
+        "currency": "USD",
+    }
+
+
+def test_recent_unpaid_order_without_payment_is_not_failed_prematurely():
+    scenario = SCENARIOS["missing_payment"]
+    recent_order = scenario.merchant_orders[0].model_copy(
+        update={
+            "order_status": "pending",
+            "order_created_at": SYNTHETIC_NOW - timedelta(minutes=5),
+        }
+    )
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (recent_order,), ()
+    )
+
+    assert result.exception_cases == ()
+
+
+def test_old_pending_order_without_payment_is_missing_after_threshold():
+    scenario = SCENARIOS["missing_payment"]
+    old_order = scenario.merchant_orders[0].model_copy(
+        update={"order_status": "pending"}
+    )
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run((old_order,), ())
+
+    assert _types(result) == {ExceptionType.MISSING_PAYMENT}
+
+
+def test_pending_capture_is_not_failed_before_threshold_but_is_delayed_afterward():
+    scenario = SCENARIOS["successful_payment"]
+    recent_order = scenario.merchant_orders[0].model_copy(
+        update={
+            "order_status": "pending",
+            "order_created_at": SYNTHETIC_NOW - timedelta(minutes=5),
+        }
+    )
+    pending_payment = scenario.paypal_payments[0].model_copy(
+        update={"capture_status": "PENDING"}
+    )
+    recent_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (recent_order,), (pending_payment,)
+    )
+    old_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (scenario.merchant_orders[0].model_copy(update={"order_status": "pending"}),),
+        (pending_payment,),
+    )
+
+    assert recent_result.exception_cases == ()
+    assert _types(old_result) == {ExceptionType.DELAYED_UPDATE}
+
+
+def test_complete_capture_without_merchant_paid_update_waits_for_threshold():
+    scenario = SCENARIOS["successful_payment"]
+    recent_order = scenario.merchant_orders[0].model_copy(
+        update={
+            "order_status": "pending",
+            "order_created_at": SYNTHETIC_NOW - timedelta(minutes=5),
+        }
+    )
+    old_order = scenario.merchant_orders[0].model_copy(
+        update={"order_status": "pending"}
+    )
+
+    recent_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (recent_order,), scenario.paypal_payments
+    )
+    old_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (old_order,), scenario.paypal_payments
+    )
+
+    assert recent_result.exception_cases == ()
+    assert _types(old_result) == {ExceptionType.STATUS_MISMATCH}
+
+
+def test_multiple_partial_captures_can_complete_an_unpaid_merchant_order():
+    scenario = SCENARIOS["partial_captures"]
+    order = scenario.merchant_orders[0].model_copy(
+        update={"order_status": "pending"}
+    )
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (order,), scenario.paypal_payments
+    )
+
+    status_case = next(
+        case
+        for case in result.exception_cases
+        if case.exception_type == ExceptionType.STATUS_MISMATCH
+    )
+    assert status_case.expected_value == "paid"
+    assert set(status_case.evidence_identifiers) >= {
+        "SYNTH-CAPTURE-PART-001",
+        "SYNTH-CAPTURE-PART-002",
+    }
+
+
+def test_denied_capture_is_missing_payment_only_after_threshold_for_unpaid_order():
+    scenario = SCENARIOS["successful_payment"]
+    recent_order = scenario.merchant_orders[0].model_copy(
+        update={
+            "order_status": "pending",
+            "order_created_at": SYNTHETIC_NOW - timedelta(minutes=5),
+        }
+    )
+    denied_payment = scenario.paypal_payments[0].model_copy(
+        update={"capture_status": "DENIED"}
+    )
+    recent_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (recent_order,), (denied_payment,)
+    )
+    old_result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (
+            scenario.merchant_orders[0].model_copy(
+                update={"order_status": "pending"}
+            ),
+        ),
+        (denied_payment,),
+    )
+
+    assert recent_result.exception_cases == ()
+    assert _types(old_result) == {ExceptionType.MISSING_PAYMENT}
+
+
+def test_missing_payment_threshold_is_configurable():
+    scenario = SCENARIOS["missing_payment"]
+    pending_order = scenario.merchant_orders[0].model_copy(
+        update={"order_status": "pending"}
+    )
+
+    below_threshold = ReconciliationEngine(
+        clock=lambda: SYNTHETIC_NOW, delay_threshold=timedelta(hours=2)
+    ).run((pending_order,), ())
+    above_threshold = ReconciliationEngine(
+        clock=lambda: SYNTHETIC_NOW, delay_threshold=timedelta(minutes=30)
+    ).run((pending_order,), ())
+
+    assert below_threshold.exception_cases == ()
+    assert _types(above_threshold) == {ExceptionType.MISSING_PAYMENT}
+
+
+def test_latest_verified_capture_event_flags_missing_merchant_update():
+    scenario = SCENARIOS["out_of_order_events"]
+    order = scenario.merchant_orders[0].model_copy(
+        update={"order_status": "pending"}
+    )
+    older_pending = scenario.webhook_events[0].model_copy(
+        update={
+            "paypal_event_id": "SYNTH-EVENT-PENDING",
+            "event_type": "PAYMENT.CAPTURE.PENDING",
+            "verification_status": "SUCCESS",
+            "occurred_at": SYNTHETIC_NOW - timedelta(minutes=3),
+            "received_at": SYNTHETIC_NOW - timedelta(minutes=1),
+        }
+    )
+    later_completed = scenario.webhook_events[1].model_copy(
+        update={
+            "paypal_event_id": "SYNTH-EVENT-COMPLETED",
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "verification_status": "SUCCESS",
+            "occurred_at": SYNTHETIC_NOW - timedelta(minutes=2),
+            "received_at": SYNTHETIC_NOW - timedelta(minutes=4),
+        }
+    )
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (order,),
+        scenario.paypal_payments,
+        webhook_events=(later_completed, older_pending),
+    )
+    case = next(
+        case
+        for case in result.exception_cases
+        if case.exception_type == ExceptionType.STATUS_MISMATCH
+        and "SYNTH-EVENT-COMPLETED" in case.evidence_identifiers
+    )
+
+    assert case.expected_value == "paid"
+    assert "SYNTH-EVENT-COMPLETED" in case.evidence_identifiers
+    assert "SYNTH-EVENT-PENDING" not in case.evidence_identifiers
+
+
+def test_distinct_webhook_event_ids_are_not_duplicate_payment_findings():
+    scenario = SCENARIOS["out_of_order_events"]
+    first = scenario.webhook_events[0].model_copy(
+        update={
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "verification_status": "SUCCESS",
+        }
+    )
+    second = first.model_copy(update={"paypal_event_id": "SYNTH-EVENT-OTHER"})
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        scenario.merchant_orders,
+        scenario.paypal_payments,
+        webhook_events=(first, second),
+    )
+
+    assert ExceptionType.DUPLICATE_WEBHOOK_DELIVERY not in _types(result)
+    assert ExceptionType.STATUS_MISMATCH not in _types(result)
+
+
+def test_unverified_capture_events_do_not_drive_merchant_status_reconciliation():
+    scenario = SCENARIOS["out_of_order_events"]
+    order = scenario.merchant_orders[0].model_copy(
+        update={
+            "order_status": "pending",
+            "order_created_at": SYNTHETIC_NOW - timedelta(minutes=5),
+        }
+    )
+    unverified_event = scenario.webhook_events[0].model_copy(
+        update={
+            "event_type": "PAYMENT.CAPTURE.COMPLETED",
+            "verification_status": "synthetic_unverified",
+        }
+    )
+
+    result = ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+        (order,),
+        scenario.paypal_payments,
+        webhook_events=(unverified_event,),
+    )
+
+    assert ExceptionType.STATUS_MISMATCH not in _types(result)
+
+
+def test_refund_requires_explicit_capture_link_when_order_has_multiple_captures():
+    partial = SCENARIOS["partial_captures"]
+    refund_order = SCENARIOS["refund_discrepancy"]
+    refund_without_capture_id = {
+        "merchant_order_id": "SYNTH-MERCHANT-ORDER-001",
+        "amount": Decimal("8.00"),
+        "currency": "USD",
+    }
+
+    with pytest.raises(ValueError, match="explicit capture ID"):
+        ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+            partial.merchant_orders,
+            partial.paypal_payments,
+            refund_order.business_records,
+            paypal_refund_records=(refund_without_capture_id,),
+        )
+
+
+def test_refund_capture_id_must_resolve_to_a_known_original_capture():
+    scenario = SCENARIOS["refund_discrepancy"]
+    unlinked_refund = {
+        **scenario.paypal_refund_records[0],
+        "capture_id": "SYNTH-UNKNOWN-CAPTURE",
+    }
+
+    with pytest.raises(ValueError, match="known original capture"):
+        ReconciliationEngine(clock=lambda: SYNTHETIC_NOW).run(
+            scenario.merchant_orders,
+            scenario.paypal_payments,
+            scenario.business_records,
+            paypal_refund_records=(unlinked_refund,),
+        )
 
 
 def test_refund_comparison_is_skipped_when_merchant_snapshot_is_missing():

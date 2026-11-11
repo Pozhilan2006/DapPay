@@ -3,7 +3,7 @@
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from app.integration_contracts.payment_data import (
     ProvisionalMerchantBusinessRecords,
@@ -17,7 +17,9 @@ from app.reconciliation.rules import (
     DEFAULT_PAID_ORDER_STATUSES,
     DEFAULT_SUCCESSFUL_CAPTURE_STATUSES,
     ExceptionCase,
+    ExceptionType,
     evaluate_refunds,
+    evaluate_status_events,
     evaluate_webhook_events,
     reconcile_transaction,
 )
@@ -104,6 +106,33 @@ class ReconciliationEngine:
                 delay_threshold=self._delay_threshold,
             )
         )
+        status_event_cases = evaluate_status_events(
+            merchant_orders,
+            paypal_payments,
+            webhook_events,
+            detected_at=detected_at,
+            delay_threshold=self._delay_threshold,
+            paid_order_statuses=self._paid_order_statuses,
+        )
+        for event_case in status_event_cases:
+            if event_case.exception_type == ExceptionType.STATUS_MISMATCH:
+                cases = [
+                    case
+                    for case in cases
+                    if not (
+                        case.exception_type == ExceptionType.STATUS_MISMATCH
+                        and case.merchant_order_id == event_case.merchant_order_id
+                        and case.capture_id == event_case.capture_id
+                        and (
+                            (
+                                case.expected_value == event_case.expected_value
+                                and case.actual_value == event_case.actual_value
+                            )
+                            or case.expected_value == "successful capture for paid order"
+                        )
+                    )
+                ]
+        cases.extend(status_event_cases)
         cases.extend(
             evaluate_refunds(
                 business_records,

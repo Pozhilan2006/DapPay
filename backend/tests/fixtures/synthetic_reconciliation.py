@@ -118,6 +118,7 @@ def build_synthetic_scenarios() -> dict[str, SyntheticScenario]:
                 {
                     "paypal_refund_id": "SYNTH-PAYPAL-REFUND-001",
                     "merchant_order_id": "SYNTH-MERCHANT-ORDER-001",
+                    "capture_id": "SYNTH-CAPTURE-001",
                     "amount": Decimal("8.00"),
                     "currency": "USD",
                 },

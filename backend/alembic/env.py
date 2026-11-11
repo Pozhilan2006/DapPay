@@ -5,10 +5,22 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
 from app.database.base import Base
-from app.models import MerchantOrder, PaymentCapture, WebhookEvent
+from app.models import (
+    InvestigationReportRecord,
+    MerchantOrder,
+    PaymentCapture,
+    ReconciliationExceptionRecord,
+    WebhookEvent,
+)
 
 config = context.config
-_registered_models = (MerchantOrder, PaymentCapture, WebhookEvent)
+_registered_models = (
+    InvestigationReportRecord,
+    MerchantOrder,
+    PaymentCapture,
+    ReconciliationExceptionRecord,
+    WebhookEvent,
+)
 config.set_main_option(
     "sqlalchemy.url", get_settings().database_url.replace("%", "%%")
 )

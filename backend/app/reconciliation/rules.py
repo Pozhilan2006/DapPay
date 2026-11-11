@@ -10,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from app.integration_contracts.payment_data import (
     ProvisionalMerchantBusinessRecords,
+    ProvisionalMerchantOrder,
     ProvisionalPayPalPayment,
     ProvisionalWebhookEvent,
 )
@@ -24,6 +25,7 @@ class ExceptionType(StrEnum):
     CURRENCY_MISMATCH = "CURRENCY_MISMATCH"
     STATUS_MISMATCH = "STATUS_MISMATCH"
     REFUND_MISMATCH = "REFUND_MISMATCH"
+    MISSING_ACCOUNTING_ENTRY = "MISSING_ACCOUNTING_ENTRY"
     DELAYED_UPDATE = "DELAYED_UPDATE"
     DUPLICATE_WEBHOOK_DELIVERY = "DUPLICATE_WEBHOOK_DELIVERY"
 
@@ -42,6 +44,7 @@ SEVERITY_BY_TYPE: dict[ExceptionType, Severity] = {
     ExceptionType.CURRENCY_MISMATCH: Severity.HIGH,
     ExceptionType.STATUS_MISMATCH: Severity.MEDIUM,
     ExceptionType.REFUND_MISMATCH: Severity.HIGH,
+    ExceptionType.MISSING_ACCOUNTING_ENTRY: Severity.HIGH,
     ExceptionType.DELAYED_UPDATE: Severity.LOW,
     ExceptionType.DUPLICATE_WEBHOOK_DELIVERY: Severity.LOW,
 }
@@ -138,6 +141,11 @@ def reconcile_transaction(
             for payment in payments
         ]
     if not payments:
+        if (
+            _status(order.order_status) not in _normalized_statuses(paid_order_statuses)
+            and not _is_delayed(order.order_created_at, detected_at, delay_threshold)
+        ):
+            return []
         return [
             create_exception(
                 ExceptionType.MISSING_PAYMENT,
@@ -156,6 +164,7 @@ def reconcile_transaction(
     paid_statuses = _normalized_statuses(paid_order_statuses)
     successful_statuses = _normalized_statuses(successful_capture_statuses)
     denied_statuses = _normalized_statuses(denied_capture_statuses)
+    pending_statuses = frozenset({"pending", "created", "approved", "in_progress"})
     order_is_paid = _status(order.order_status) in paid_statuses
 
     for payment in payments:
@@ -212,17 +221,50 @@ def reconcile_transaction(
                         detected_at=detected_at,
                     )
                 )
-        elif capture_status in denied_statuses and order_is_paid:
+        elif capture_status in denied_statuses:
+            if order_is_paid:
+                cases.append(
+                    create_exception(
+                        ExceptionType.STATUS_MISMATCH,
+                        merchant_order_id=order.merchant_order_id,
+                        paypal_order_id=payment.paypal_order_id,
+                        capture_id=payment.paypal_capture_id,
+                        expected_value="successful capture for paid order",
+                        actual_value=payment.capture_status,
+                        evidence_identifiers=payment_evidence,
+                        explanation="Merchant order is marked paid, but a related PayPal capture is denied or failed.",
+                        detected_at=detected_at,
+                    )
+                )
+            elif _is_delayed(
+                order.order_created_at, detected_at, delay_threshold
+            ):
+                cases.append(
+                    create_exception(
+                        ExceptionType.MISSING_PAYMENT,
+                        merchant_order_id=order.merchant_order_id,
+                        paypal_order_id=payment.paypal_order_id,
+                        capture_id=payment.paypal_capture_id,
+                        expected_value="successful PayPal capture",
+                        actual_value=payment.capture_status,
+                        evidence_identifiers=payment_evidence,
+                        explanation="The related PayPal capture failed and the configured payment wait threshold has elapsed.",
+                        detected_at=detected_at,
+                    )
+                )
+        elif capture_status in pending_statuses and _is_delayed(
+            order.order_created_at, detected_at, delay_threshold
+        ):
             cases.append(
                 create_exception(
-                    ExceptionType.STATUS_MISMATCH,
+                    ExceptionType.DELAYED_UPDATE,
                     merchant_order_id=order.merchant_order_id,
                     paypal_order_id=payment.paypal_order_id,
                     capture_id=payment.paypal_capture_id,
-                    expected_value="successful capture for paid order",
+                    expected_value="terminal capture status",
                     actual_value=payment.capture_status,
                     evidence_identifiers=payment_evidence,
-                    explanation="Merchant order is marked paid, but a related PayPal capture is denied or failed.",
+                    explanation="PayPal capture remains pending after the configured payment wait threshold.",
                     detected_at=detected_at,
                 )
             )
@@ -240,7 +282,10 @@ def reconcile_transaction(
                 )
             )
 
-    if order_is_paid and not successful:
+    has_pending = any(
+        _status(payment.capture_status) in pending_statuses for payment in payments
+    )
+    if order_is_paid and not successful and not has_pending:
         if not any(case.exception_type == ExceptionType.STATUS_MISMATCH for case in cases):
             cases.append(
                 create_exception(
@@ -276,7 +321,34 @@ def reconcile_transaction(
                     actual_value=actual_total,
                     evidence_identifiers=_all_payment_evidence(comparable)
                     + (order.merchant_order_id,),
-                    explanation="Total successful captures in the order currency differ from the expected order amount.",
+                    explanation=(
+                        "Total successful captures in the order currency differ "
+                        f"from the expected order amount by "
+                        f"{actual_total - order.expected_amount} {expected_currency}."
+                    ),
+                    detected_at=detected_at,
+                )
+            )
+        elif (
+            not order_is_paid
+            and _is_delayed(order.order_created_at, detected_at, delay_threshold)
+        ):
+            cases.append(
+                create_exception(
+                    ExceptionType.STATUS_MISMATCH,
+                    merchant_order_id=order.merchant_order_id,
+                    paypal_order_id=_single_or_none(
+                        payment.paypal_order_id for payment in comparable
+                    ),
+                    expected_value="paid",
+                    actual_value=order.order_status,
+                    evidence_identifiers=_all_payment_evidence(comparable)
+                    + (order.merchant_order_id,),
+                    explanation=(
+                        "Successful captures cover the merchant order total, but "
+                        "the merchant order has not been marked paid after the "
+                        "configured update threshold."
+                    ),
                     detected_at=detected_at,
                 )
             )
@@ -320,6 +392,104 @@ def evaluate_webhook_events(
     return cases
 
 
+def evaluate_status_events(
+    orders: Sequence[ProvisionalMerchantOrder],
+    payments: Sequence[ProvisionalPayPalPayment],
+    events: Sequence[ProvisionalWebhookEvent],
+    *,
+    detected_at: datetime,
+    delay_threshold: timedelta,
+    paid_order_statuses: frozenset[str] = DEFAULT_PAID_ORDER_STATUSES,
+) -> list[ExceptionCase]:
+    """Compare each capture's latest verified lifecycle event with merchant state."""
+    event_statuses = {
+        "PAYMENT.CAPTURE.PENDING": "pending",
+        "PAYMENT.CAPTURE.COMPLETED": "completed",
+        "PAYMENT.CAPTURE.DENIED": "denied",
+    }
+    orders_by_id = {order.merchant_order_id: order for order in orders}
+    payments_by_capture = {
+        payment.paypal_capture_id: payment
+        for payment in payments
+        if payment.paypal_capture_id is not None
+    }
+    latest_by_capture: dict[str, ProvisionalWebhookEvent] = {}
+    for event in events:
+        event_status = event_statuses.get(event.event_type.upper())
+        if (
+            event_status is None
+            or event.verification_status.strip().casefold()
+            not in {"success", "verified"}
+            or event.occurred_at > detected_at
+        ):
+            continue
+        current = latest_by_capture.get(event.related_resource_id)
+        if current is None or (
+            event.occurred_at,
+            event.paypal_event_id,
+        ) > (current.occurred_at, current.paypal_event_id):
+            latest_by_capture[event.related_resource_id] = event
+
+    paid_statuses = _normalized_statuses(paid_order_statuses)
+    cases: list[ExceptionCase] = []
+    for capture_id, event in sorted(latest_by_capture.items()):
+        payment = payments_by_capture.get(capture_id)
+        if payment is None:
+            continue
+        order = orders_by_id.get(payment.merchant_order_id)
+        if order is None:
+            continue
+        event_status = event_statuses[event.event_type.upper()]
+        merchant_is_paid = _status(order.order_status) in paid_statuses
+        evidence = _payment_evidence(payment) + (event.paypal_event_id,)
+        if event_status == "pending":
+            if _is_delayed(order.order_created_at, detected_at, delay_threshold):
+                cases.append(
+                    create_exception(
+                        ExceptionType.DELAYED_UPDATE,
+                        merchant_order_id=order.merchant_order_id,
+                        paypal_order_id=payment.paypal_order_id,
+                        capture_id=capture_id,
+                        expected_value="terminal PayPal capture event",
+                        actual_value=event.event_type,
+                        evidence_identifiers=evidence,
+                        explanation="The latest verified capture event remains pending after the configured threshold.",
+                        detected_at=detected_at,
+                    )
+                )
+            continue
+        if (
+            (event_status == "completed") != merchant_is_paid
+            and (
+                event_status != "completed"
+                or _is_delayed(
+                    order.order_created_at, detected_at, delay_threshold
+                )
+            )
+        ):
+            expected = "paid" if event_status == "completed" else "not paid"
+            cases.append(
+                create_exception(
+                    ExceptionType.STATUS_MISMATCH,
+                    merchant_order_id=order.merchant_order_id,
+                    paypal_order_id=payment.paypal_order_id,
+                    capture_id=capture_id,
+                    expected_value=expected,
+                    actual_value=order.order_status,
+                    evidence_identifiers=evidence,
+                    explanation=(
+                        "Latest verified PayPal capture event indicates completion, "
+                        "but the merchant order is not marked paid."
+                        if event_status == "completed"
+                        else "Latest verified PayPal capture event indicates denial, "
+                        "but the merchant order is marked paid."
+                    ),
+                    detected_at=detected_at,
+                )
+            )
+    return cases
+
+
 def evaluate_refunds(
     business_records: Sequence[ProvisionalMerchantBusinessRecords],
     paypal_refund_records: Sequence[Mapping[str, Any]] | None,
@@ -340,17 +510,44 @@ def evaluate_refunds(
     paypal_by_order: dict[str, list[Mapping[str, Any]]] = {}
     for refund in paypal_refund_records:
         order_id = refund.get("merchant_order_id")
-        if order_id is None and refund.get("capture_id") is not None:
-            order_id = capture_to_order.get(str(refund["capture_id"]))
+        capture_id = refund.get("capture_id", refund.get("paypal_capture_id"))
+        if capture_id is not None:
+            capture_id = str(capture_id)
+            linked_order_id = capture_to_order.get(capture_id)
+            if linked_order_id is None:
+                raise ValueError(
+                    "PayPal refund records must link to a known original capture"
+                )
+            if order_id is not None and str(order_id) != linked_order_id:
+                raise ValueError(
+                    "PayPal refund merchant order does not match its original capture"
+                )
+            order_id = linked_order_id
+        elif order_id is not None:
+            order_captures = [
+                payment.paypal_capture_id
+                for payment in payment_records
+                if payment.merchant_order_id == str(order_id)
+                and payment.paypal_capture_id is not None
+            ]
+            if len(order_captures) != 1:
+                raise ValueError(
+                    "PayPal refund records require an explicit capture ID when "
+                    "the merchant order has zero or multiple captures"
+                )
+            capture_id = order_captures[0]
         if order_id is None:
             raise ValueError(
                 "PayPal refund records must link to a merchant order or known capture"
             )
-        paypal_by_order.setdefault(str(order_id), []).append(refund)
+        paypal_by_order.setdefault(str(order_id), []).append(
+            {**refund, "capture_id": str(capture_id)}
+        )
 
     cases: list[ExceptionCase] = []
     for order_id in sorted(merchant_by_order):
-        merchant_refunds = merchant_by_order[order_id].refund_records
+        business_record = merchant_by_order[order_id]
+        merchant_refunds = business_record.refund_records
         paypal_refunds = paypal_by_order.get(order_id, [])
         if not merchant_refunds and not paypal_refunds:
             continue
@@ -360,6 +557,11 @@ def evaluate_refunds(
             evidence = [order_id]
             evidence.extend(_record_identifier(refund) for refund in merchant_refunds)
             evidence.extend(_record_identifier(refund) for refund in paypal_refunds)
+            evidence.extend(
+                str(refund["capture_id"])
+                for refund in paypal_refunds
+                if refund.get("capture_id") is not None
+            )
             cases.append(
                 create_exception(
                     ExceptionType.REFUND_MISMATCH,
@@ -371,6 +573,45 @@ def evaluate_refunds(
                     detected_at=detected_at,
                 )
             )
+        accounting_entries = business_record.accounting_entries
+        for refund in paypal_refunds:
+            refund_id = _record_identifier(refund)
+            capture_id = str(refund["capture_id"])
+            amount = _decimal_amount(refund.get("amount"))
+            currency = _currency(str(refund.get("currency", "")))
+            if not currency:
+                raise ValueError("Refund records must include a currency code")
+            accounted = any(
+                _accounting_entry_matches(
+                    entry,
+                    refund_id=refund_id,
+                    capture_id=capture_id,
+                    amount=amount,
+                    currency=currency,
+                )
+                for entry in accounting_entries
+            )
+            if not accounted:
+                cases.append(
+                    create_exception(
+                        ExceptionType.MISSING_ACCOUNTING_ENTRY,
+                        merchant_order_id=order_id,
+                        capture_id=capture_id,
+                        expected_value={
+                            "refund_id": refund_id,
+                            "amount": amount,
+                            "currency": currency,
+                        },
+                        actual_value=None,
+                        evidence_identifiers=(
+                            identifier
+                            for identifier in (order_id, capture_id, refund_id)
+                            if identifier
+                        ),
+                        explanation="PayPal refund has no matching merchant accounting entry.",
+                        detected_at=detected_at,
+                    )
+                )
     return cases
 
 
@@ -443,6 +684,35 @@ def _record_identifier(record: Mapping[str, Any]) -> str | None:
         if value is not None:
             return str(value)
     return None
+
+
+def _accounting_entry_matches(
+    entry: Mapping[str, Any],
+    *,
+    refund_id: str | None,
+    capture_id: str,
+    amount: Decimal,
+    currency: str,
+) -> bool:
+    entry_refund_id = next(
+        (
+            str(entry[key])
+            for key in ("paypal_refund_id", "refund_id", "reference_id")
+            if entry.get(key) is not None
+        ),
+        None,
+    )
+    if refund_id is not None and entry_refund_id == refund_id:
+        return True
+    if str(entry.get("capture_id", entry.get("paypal_capture_id", ""))) != capture_id:
+        return False
+    if entry.get("amount") is None or entry.get("currency") is None:
+        return False
+    entry_amount = _decimal_amount(entry["amount"])
+    return (
+        entry_amount == amount
+        and _currency(str(entry.get("currency", ""))) == currency
+    )
 
 
 def _json_value(value: Any) -> Any:
