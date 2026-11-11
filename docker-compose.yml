@@ -31,6 +31,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payrecon}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payrecon}
       APP_ENV: development
+      INVESTIGATION_LLM_PROVIDER: ${INVESTIGATION_LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      INVESTIGATION_LLM_TIMEOUT_SECONDS: ${INVESTIGATION_LLM_TIMEOUT_SECONDS:-180}
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ./backend:/app
