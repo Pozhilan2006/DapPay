@@ -257,21 +257,6 @@ export const investigations: Investigation[] = [
   },
 ];
 
-export const activityData = [
-  { day: "May 18", successful: 620, failed: 34, pending: 42 },
-  { day: "May 19", successful: 710, failed: 41, pending: 28 },
-  { day: "May 20", successful: 680, failed: 29, pending: 36 },
-  { day: "May 21", successful: 820, failed: 45, pending: 31 },
-  { day: "May 22", successful: 780, failed: 32, pending: 44 },
-  { day: "May 23", successful: 910, failed: 38, pending: 27 },
-  { day: "May 24", successful: 860, failed: 24, pending: 39 },
-];
-
-export const reconciliationData = [
-  { name: "Matched", value: 94.7, color: "#0B2A4A" },
-  { name: "Unmatched", value: 5.3, color: "#60A5FA" },
-];
-
 export const formatMoney = (value: number) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
 

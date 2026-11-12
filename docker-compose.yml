@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-payrecon}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD before starting Docker Compose}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -30,7 +30,6 @@ services:
       - ./backend/.env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-payrecon}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-payrecon}
-      APP_ENV: development
       INVESTIGATION_LLM_PROVIDER: ${INVESTIGATION_LLM_PROVIDER:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
@@ -49,6 +48,7 @@ services:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_PUBLIC_PAYPAL_MODE: ${NEXT_PUBLIC_PAYPAL_MODE:-sandbox}
 
 volumes:
   postgres_data:

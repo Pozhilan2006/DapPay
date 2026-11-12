@@ -170,6 +170,16 @@ def test_all_sensitive_read_routes_require_a_bearer_token(api_client):
     )
 
 
+def test_empty_payment_and_order_lists_return_empty_arrays(api_client):
+    payments = api_client.get("/api/payments")
+    orders = api_client.get("/api/orders")
+
+    assert payments.status_code == 200
+    assert payments.json() == []
+    assert orders.status_code == 200
+    assert orders.json() == []
+
+
 def test_unknown_role_and_missing_tenant_claim_are_rejected(api_client):
     unknown_role = api_client.get(
         "/api/orders", headers=_auth(_token("owner", "merchant-a"))
@@ -185,7 +195,14 @@ def test_unknown_role_and_missing_tenant_claim_are_rejected(api_client):
 def test_authentication_fails_closed_when_signing_secret_is_not_configured(
     api_client,
 ):
-    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None)
+    # Explicitly override environment-backed values so a developer's local
+    # .env cannot make this fail-closed test pass or fail nondeterministically.
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        AUTH_JWT_SECRET="",
+        AUTH_JWT_ISSUER="payrecon-tests",
+        AUTH_JWT_AUDIENCE="payrecon-test-api",
+    )
 
     response = api_client.get("/api/orders", headers=_auth(_token("admin")))
 

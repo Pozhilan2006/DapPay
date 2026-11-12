@@ -1,7 +1,8 @@
 ﻿from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
     auth_jwt_secret: str = Field(default="", alias="AUTH_JWT_SECRET")
     auth_jwt_issuer: str = Field(default="payrecon-ai", alias="AUTH_JWT_ISSUER")
     auth_jwt_audience: str = Field(default="payrecon-api", alias="AUTH_JWT_AUDIENCE")
+    cors_allowed_origins: list[str] = Field(
+        default_factory=list, alias="CORS_ALLOWED_ORIGINS"
+    )
     investigation_llm_provider: Literal["ollama"] = Field(
         default="ollama", alias="INVESTIGATION_LLM_PROVIDER"
     )
@@ -57,6 +61,50 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", case_sensitive=False, extra="ignore"
     )
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def validate_cors_allowed_origins(cls, origins: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in origins:
+            origin = value.strip().rstrip("/")
+            parsed = urlsplit(origin)
+            try:
+                port = parsed.port
+            except ValueError as error:
+                raise ValueError("CORS origins must be valid HTTP(S) origins.") from error
+            if (
+                "*" in origin
+                or parsed.scheme not in {"http", "https"}
+                or parsed.hostname is None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+                or (port is not None and not 1 <= port <= 65535)
+            ):
+                raise ValueError("CORS origins must be valid HTTP(S) origins.")
+            canonical_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            if canonical_origin not in normalized:
+                normalized.append(canonical_origin)
+        return normalized
+
+    @model_validator(mode="after")
+    def require_explicit_non_development_cors_origins(self) -> "Settings":
+        if self.app_env != "development":
+            if not self.cors_allowed_origins:
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must be configured outside development."
+                )
+            if any(
+                not origin.startswith("https://")
+                for origin in self.cors_allowed_origins
+            ):
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must use HTTPS outside development."
+                )
+        return self
 
 
 @lru_cache
